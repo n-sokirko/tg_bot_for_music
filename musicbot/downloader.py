@@ -40,6 +40,27 @@ _ERROR_HINTS = (
 )
 
 
+class _YtdlpLogger:
+    """Route yt-dlp's messages into our log.
+
+    Warnings are what explain odd failures (an unsupported JS runtime, a missing
+    format), so they must not be silenced. Errors are also raised as exceptions
+    and routinely expected (private video), so they stay at debug level.
+    """
+
+    def debug(self, msg: str) -> None:
+        pass
+
+    def info(self, msg: str) -> None:
+        pass
+
+    def warning(self, msg: str) -> None:
+        log.warning("yt-dlp: %s", msg)
+
+    def error(self, msg: str) -> None:
+        log.debug("yt-dlp: %s", msg)
+
+
 class DownloadError(Exception):
     """A failure whose message is safe to show to the user as is."""
 
@@ -114,12 +135,11 @@ class Downloader:
         runtimes = {name: {} for name in ("deno", "node", "bun") if shutil.which(name)}
         self._js_runtimes = runtimes or None
         if self._js_runtimes is None:
-            log.warning("No JS runtime (deno/node/bun) found: YouTube extraction may fail")
+            log.warning("No JS runtime (Node 22+, Deno 2.3+ or Bun) found: YouTube extraction may fail")
 
     def _base_opts(self, scratch: Path) -> dict[str, Any]:
         opts: dict[str, Any] = {
-            "quiet": True,
-            "no_warnings": True,
+            "logger": _YtdlpLogger(),
             "noprogress": True,
             "socket_timeout": 30,
             "retries": 3,

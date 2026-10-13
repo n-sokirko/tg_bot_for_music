@@ -10,7 +10,7 @@
 
 ## Запуск
 
-Нужны Python 3.10+, [ffmpeg](https://ffmpeg.org/) и JS-рантайм ([Deno](https://deno.com/) или Node.js): без него yt-dlp не справляется с защитой YouTube.
+Нужны Python 3.10+, [ffmpeg](https://ffmpeg.org/) и JS-рантайм: [Node.js](https://nodejs.org/) **22 или новее** либо [Deno](https://deno.com/) 2.3+. Без него yt-dlp не справляется с защитой YouTube. Версия Node из `apt` на Ubuntu и Debian обычно старше (проверь `node --version`) и не подойдёт.
 
 1. Создай бота у [@BotFather](https://t.me/BotFather) и скопируй токен.
 2. Установи и запусти:
@@ -46,6 +46,7 @@ docker compose up -d --build
 ## Если что-то не работает
 
 - **«YouTube заподозрил бота».** С IP дата-центров такое случается часто. Выгрузи cookies YouTube в формате Netscape в `cookies.txt` (расширение вроде «Get cookies.txt LOCALLY», лучше из отдельного аккаунта) и укажи путь в `COOKIES_FILE`. В Docker смонтируй файл по примеру из `docker-compose.yml`.
+- **В логе предупреждение про JavaScript runtime.** Установлен слишком старый Node.js или его нет совсем, см. требования выше.
 - **Внезапно перестало скачивать или искать.** YouTube регулярно меняется, и библиотеки приходится обновлять: `pip install -U yt-dlp ytmusicapi` (в Docker пересобери образ: `docker compose build --no-cache`).
 - **«Файл больше 50 МБ».** Это лимит Telegram для ботов. При 192 кбит/с в него помещается около 35 минут звука.
 

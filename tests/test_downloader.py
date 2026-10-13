@@ -149,3 +149,13 @@ async def test_playlist_error_is_translated(monkeypatch):
     monkeypatch.setattr(dl, "_extract", extract)
     with pytest.raises(DownloadError, match="не найден"):
         await make().playlist("PL123")
+
+
+def test_ytdlp_warnings_reach_our_log(tmp_path, caplog):
+    opts = make()._base_opts(tmp_path)
+    with caplog.at_level("DEBUG", logger="musicbot.downloader"):
+        opts["logger"].warning("no supported JavaScript runtime could be found")
+        opts["logger"].info("noise")
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1 and "JavaScript runtime" in warnings[0].getMessage()
+    assert "quiet" not in opts and "no_warnings" not in opts
