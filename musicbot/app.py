@@ -5,11 +5,14 @@ from aiogram import Dispatcher
 from .config import Settings
 from .downloader import Downloader
 from .handlers import AccessMiddleware, ActiveJobs, PendingStore, router
+from .search import Search
 
 
-def build_dispatcher(settings: Settings, downloader: Downloader) -> Dispatcher:
+def build_dispatcher(settings: Settings, downloader: Downloader, searcher: Search) -> Dispatcher:
     # Keyword arguments become workflow data: handlers receive them by parameter name.
-    dp = Dispatcher(settings=settings, downloader=downloader, pending=PendingStore(), jobs=ActiveJobs())
+    dp = Dispatcher(
+        settings=settings, downloader=downloader, searcher=searcher, pending=PendingStore(), jobs=ActiveJobs()
+    )
 
     access = AccessMiddleware(settings.allowed_users)
     dp.message.outer_middleware(access)

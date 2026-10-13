@@ -27,6 +27,14 @@ class Link:
     id: str
 
 
+def is_video_id(value: str) -> bool:
+    return bool(_VIDEO_ID_RE.fullmatch(value))
+
+
+def has_url(text: str) -> bool:
+    return _URL_RE.search(text) is not None
+
+
 def parse_link(url: str) -> Link | None:
     try:
         parts = urlparse(url)

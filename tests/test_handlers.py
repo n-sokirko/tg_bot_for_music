@@ -12,12 +12,15 @@ from aiogram.methods import DeleteMessage, EditMessageText, SendAudio, SendMessa
 from aiogram.types import CallbackQuery, Chat, Message, User
 
 from musicbot.downloader import DownloadError, Playlist, PlaylistEntry, Track
+from musicbot.search import SearchResult
 from musicbot.handlers import (
     AccessMiddleware,
     ActiveJobs,
     PendingPlaylist,
     PendingStore,
+    PickTrack,
     PlaylistAction,
+    on_pick,
     on_playlist_go,
     on_text,
     run_playlist,
@@ -73,6 +76,21 @@ class FakeDownloader:
         if self._playlist is None:
             raise DownloadError("Плейлист не найден или приватный.")
         return self._playlist
+
+
+class FakeSearch:
+    def __init__(self, results=(), error=None):
+        self.results, self.error, self.queries = list(results), error, []
+
+    async def songs(self, query):
+        self.queries.append(query)
+        if self.error:
+            raise self.error
+        return self.results
+
+
+def songs(n):
+    return [SearchResult(f"vid{i:08d}", f"Song {i}", "Band" if i % 2 else None, 60 * i + 5) for i in range(1, n + 1)]
 
 
 @pytest.fixture
@@ -192,7 +210,7 @@ def test_active_jobs():
 async def test_text_with_playlist_link_offers_buttons(bot, session):
     downloader = FakeDownloader(playlist=Playlist("Road <trip>", entries("a", "b"), total=80))
     store = PendingStore()
-    await on_text(message(bot, "https://music.youtube.com/playlist?list=PL123"), bot, downloader, store)
+    await on_text(message(bot, "https://music.youtube.com/playlist?list=PL123"), bot, downloader, store, FakeSearch())
 
     offer = session.of(EditMessageText)[-1]
     assert "Road &lt;trip&gt;" in offer.text and "Треков: 80 (скачаю первые 2)" in offer.text
@@ -202,9 +220,86 @@ async def test_text_with_playlist_link_offers_buttons(bot, session):
     assert go.action == "go" and store.pop(go.token, USER.id) is not None
 
 
-async def test_text_without_links_gives_hint(bot, session):
-    await on_text(message(bot, "привет"), bot, FakeDownloader(), PendingStore())
-    assert "ссылку" in session.of(SendMessage)[-1].text
+async def ask(bot, text, searcher, downloader=None):
+    await on_text(message(bot, text), bot, downloader or FakeDownloader(), PendingStore(), searcher)
+
+
+async def test_plain_text_is_searched_and_listed(bot, session):
+    searcher = FakeSearch(songs(8))
+    await ask(bot, "  adele hello ", searcher)
+
+    assert searcher.queries == ["adele hello"]
+    listing = session.of(EditMessageText)[-1]
+    assert "1. Band — Song 1 · 1:05" in listing.text
+    assert "2. Song 2 · 2:05" in listing.text  # no artist known
+    rows = listing.reply_markup.inline_keyboard
+    assert [[b.text for b in row] for row in rows] == [["1", "2", "3", "4"], ["5", "6", "7", "8"]]
+    data = [b.callback_data for row in rows for b in row]
+    assert all(len(d.encode()) <= 64 for d in data)
+    assert PickTrack.unpack(data[2]).video_id == "vid00000003"
+
+
+async def test_search_results_are_html_escaped(bot, session):
+    await ask(bot, "a <b>", FakeSearch([SearchResult("vid00000001", "<i>x</i>", "A&B", 61)]))
+    text = session.of(EditMessageText)[-1].text
+    assert "&lt;b&gt;" in text and "A&amp;B — &lt;i&gt;x&lt;/i&gt;" in text
+
+
+async def test_search_without_results(bot, session):
+    await ask(bot, "asdkjhasd", FakeSearch([]))
+    assert "Ничего не нашёл" in session.of(EditMessageText)[-1].text
+
+
+async def test_search_failure_is_reported(bot, session):
+    await ask(bot, "adele", FakeSearch(error=DownloadError("Поиск сейчас недоступен.")))
+    assert "Поиск сейчас недоступен" in session.of(EditMessageText)[-1].text
+    await ask(bot, "adele", FakeSearch(error=RuntimeError("secret")))
+    assert "secret" not in session.of(EditMessageText)[-1].text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("https://open.spotify.com/track/abc", "ссылку я не умею"),
+        ("/nope", "Не знаю такой команды"),
+        ("x" * 101, "Слишком длинный"),
+    ],
+)
+async def test_text_that_is_not_a_query(bot, session, text, expected):
+    searcher = FakeSearch(songs(3))
+    await ask(bot, text, searcher)
+    assert searcher.queries == []
+    assert expected in session.of(SendMessage)[-1].text
+
+
+async def test_picking_a_result_sends_that_track(bot, session):
+    class Call:
+        from_user = USER
+        message = Message(message_id=5, date=datetime.now(), chat=CHAT, from_user=USER, text="list").as_(bot)
+        answers = []
+
+        async def answer(self, text=None, show_alert=False):
+            self.answers.append(text)
+
+    downloader = FakeDownloader()
+    await on_pick(Call(), PickTrack(video_id="vid00000003"), bot, downloader)
+    assert downloader.requested == ["vid00000003"]
+    assert len(session.of(SendAudio)) == 1
+
+
+async def test_forged_pick_is_rejected(bot):
+    answers = []
+
+    class Call:
+        from_user = USER
+        message = Message(message_id=5, date=datetime.now(), chat=CHAT, from_user=USER, text="list").as_(bot)
+
+        async def answer(self, text=None, show_alert=False):
+            answers.append(text)
+
+    downloader = FakeDownloader()
+    await on_pick(Call(), PickTrack(video_id="../../etc"), bot, downloader)
+    assert downloader.requested == [] and "устарела" in answers[0]
 
 
 async def test_hidden_text_link_is_picked_up(bot, session):
@@ -212,12 +307,12 @@ async def test_hidden_text_link_is_picked_up(bot, session):
 
     entity = MessageEntity(type="text_link", offset=0, length=4, url="https://youtu.be/dQw4w9WgXcQ")
     downloader = FakeDownloader()
-    await on_text(message(bot, "ссыль", entities=[entity]), bot, downloader, PendingStore())
+    await on_text(message(bot, "ссыль", entities=[entity]), bot, downloader, PendingStore(), FakeSearch())
     assert downloader.requested == ["dQw4w9WgXcQ"]
 
 
 async def test_unreadable_playlist_reports_error(bot, session):
-    await on_text(message(bot, "https://music.youtube.com/playlist?list=PL123"), bot, FakeDownloader(), PendingStore())
+    await on_text(message(bot, "https://music.youtube.com/playlist?list=PL123"), bot, FakeDownloader(), PendingStore(), FakeSearch())
     assert "не найден" in session.of(EditMessageText)[-1].text
 
 

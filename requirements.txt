@@ -3,3 +3,4 @@ aiogram>=3.13,<4
 # The [default] extra ships the JS challenge solver that YouTube extraction needs.
 yt-dlp[default]
 python-dotenv>=1.0
+ytmusicapi>=1.10,<2

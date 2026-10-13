@@ -26,7 +26,8 @@ from aiogram.types import (
 
 from .config import Settings
 from .downloader import Downloader, DownloadError, PlaylistEntry, Track
-from .links import Link, find_links
+from .links import Link, find_links, has_url, is_video_id
+from .search import Search, SearchResult
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -35,6 +36,8 @@ MAX_LINKS_PER_MESSAGE = 3
 # Stop a playlist after this many tracks in a row fail: it is almost always
 # a systemic problem (YouTube blocking us), not bad luck with single videos.
 MAX_CONSECUTIVE_FAILURES = 3
+SEARCH_QUERY_MAX = 100
+SEARCH_BUTTONS_PER_ROW = 4
 UPLOAD_TIMEOUT = 600  # seconds; the default 60 is too short for a slow uplink
 MAX_FAILURES_SHOWN = 10
 
@@ -103,6 +106,10 @@ class ActiveJobs:
 class PlaylistAction(CallbackData, prefix="pl"):
     action: str  # go | no | stop
     token: str = ""
+
+
+class PickTrack(CallbackData, prefix="pick"):
+    video_id: str
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -188,6 +195,52 @@ async def send_single_track(message: Message, bot: Bot, video_id: str, downloade
             await status.delete()
         except TelegramAPIError:
             pass
+
+
+# --- search by name --------------------------------------------------------
+
+
+def _format_duration(seconds: int | None) -> str:
+    if not seconds:
+        return ""
+    minutes, secs = divmod(seconds, 60)
+    return f" · {minutes}:{secs:02d}"
+
+
+def _results_text(query: str, results: list[SearchResult]) -> str:
+    lines = [f"🔎 <b>{esc(query)}</b>\n"]
+    for index, r in enumerate(results, 1):
+        name = f"{esc(r.artist)} — {esc(r.title)}" if r.artist else esc(r.title)
+        lines.append(f"{index}. {name}{_format_duration(r.duration)}")
+    lines.append("\nВыбери номер, и я пришлю трек.")
+    return "\n".join(lines)
+
+
+def _results_keyboard(results: list[SearchResult]) -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text=str(index), callback_data=PickTrack(video_id=r.video_id).pack())
+        for index, r in enumerate(results, 1)
+    ]
+    step = SEARCH_BUTTONS_PER_ROW
+    return InlineKeyboardMarkup(inline_keyboard=[buttons[i : i + step] for i in range(0, len(buttons), step)])
+
+
+async def search_tracks(message: Message, query: str, searcher: Search) -> None:
+    status = await message.answer("🔎 Ищу…")
+    try:
+        results = await searcher.songs(query)
+    except DownloadError as exc:
+        await _edit(status, f"❌ {esc(str(exc))}")
+        return
+    except Exception:
+        log.exception("Search %r failed", query)
+        await _edit(status, f"❌ {GENERIC_ERROR}")
+        return
+
+    if not results:
+        await _edit(status, f"Ничего не нашёл по запросу «{esc(query)}». Попробуй написать исполнителя и название.")
+        return
+    await _edit(status, _results_text(query, results), _results_keyboard(results))
 
 
 # --- playlists -------------------------------------------------------------
@@ -287,7 +340,9 @@ async def run_playlist(
 async def on_start(message: Message, settings: Settings) -> None:
     await message.answer(
         "👋 Я скачиваю музыку из YouTube Music и присылаю её аудиофайлом.\n\n"
-        "🎵 <b>Трек</b> — пришли ссылку на песню, получишь mp3.\n"
+        "🔎 <b>Поиск</b> — просто напиши название песни (лучше с исполнителем), "
+        "выбери нужную из списка и получи mp3.\n"
+        "🎵 <b>Трек</b> — или пришли ссылку на песню.\n"
         "📃 <b>Плейлист или альбом</b> — пришли ссылку на плейлист, и я отправлю треки по очереди "
         f"(до {settings.max_playlist_tracks} за раз).\n\n"
         "Ссылку можно взять через «Поделиться» в YouTube Music."
@@ -296,7 +351,7 @@ async def on_start(message: Message, settings: Settings) -> None:
 
 @router.message(F.text)
 async def on_text(
-    message: Message, bot: Bot, downloader: Downloader, pending: PendingStore
+    message: Message, bot: Bot, downloader: Downloader, pending: PendingStore, searcher: Search
 ) -> None:
     if message.from_user is None:
         return
@@ -304,7 +359,15 @@ async def on_text(
     hidden = [e.url for e in message.entities or [] if e.type == "text_link" and e.url]
     links: list[Link] = find_links("\n".join([message.text or "", *hidden]))
     if not links:
-        await message.answer("Пришли ссылку на трек или плейлист из YouTube Music 🎧")
+        text = (message.text or "").strip()
+        if has_url(text):
+            await message.answer("Эту ссылку я не умею. Мне подойдут ссылки из YouTube Music и YouTube 🎧")
+        elif text.startswith("/"):
+            await message.answer("Не знаю такой команды. Напиши название песни или пришли ссылку 🎧")
+        elif len(text) > SEARCH_QUERY_MAX:
+            await message.answer(f"Слишком длинный запрос: уложись в {SEARCH_QUERY_MAX} символов.")
+        else:
+            await search_tracks(message, text, searcher)
         return
 
     for link in links[:MAX_LINKS_PER_MESSAGE]:
@@ -312,6 +375,15 @@ async def on_text(
             await send_single_track(message, bot, link.id, downloader)
         else:
             await offer_playlist(message, link.id, message.from_user.id, downloader, pending)
+
+
+@router.callback_query(PickTrack.filter())
+async def on_pick(call: CallbackQuery, callback_data: PickTrack, bot: Bot, downloader: Downloader) -> None:
+    if not is_video_id(callback_data.video_id) or not isinstance(call.message, Message):
+        await call.answer("Кнопка устарела, поищи заново.", show_alert=True)
+        return
+    await call.answer("⏳ Качаю…")
+    await send_single_track(call.message, bot, callback_data.video_id, downloader)
 
 
 @router.callback_query(PlaylistAction.filter(F.action == "no"))

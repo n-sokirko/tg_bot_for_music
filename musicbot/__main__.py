@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 from .app import build_dispatcher
 from .config import load_settings
 from .downloader import Downloader
+from .search import Search
 
 
 async def main() -> None:
@@ -28,7 +29,7 @@ async def main() -> None:
         sys.exit(str(exc))
 
     bot = Bot(settings.token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = build_dispatcher(settings, Downloader(settings))
+    dp = build_dispatcher(settings, Downloader(settings), Search(settings.max_track_minutes))
 
     await bot.set_my_commands(
         [BotCommand(command="start", description="Как пользоваться"), BotCommand(command="help", description="Помощь")]
