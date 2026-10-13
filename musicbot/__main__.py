@@ -8,6 +8,7 @@ import sys
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
 from aiogram.types import BotCommand
 from dotenv import load_dotenv
 
@@ -15,6 +16,22 @@ from .app import build_dispatcher
 from .config import load_settings
 from .downloader import Downloader
 from .search import Search
+
+log = logging.getLogger(__name__)
+
+
+async def check_bot(bot: Bot) -> str:
+    """Make sure the token works and Telegram is reachable; exit with a clear message if not."""
+    try:
+        me = await bot.get_me()
+        await bot.set_my_commands(
+            [BotCommand(command="start", description="Как пользоваться"), BotCommand(command="help", description="Помощь")]
+        )
+    except TelegramUnauthorizedError:
+        sys.exit("Telegram отклонил токен: проверь BOT_TOKEN в .env (его можно перевыпустить у @BotFather).")
+    except TelegramNetworkError as exc:
+        sys.exit(f"Не удалось связаться с Telegram: проверь интернет и доступ к api.telegram.org.\n({exc})")
+    return me.username or str(me.id)
 
 
 async def main() -> None:
@@ -29,12 +46,13 @@ async def main() -> None:
         sys.exit(str(exc))
 
     bot = Bot(settings.token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    dp = build_dispatcher(settings, Downloader(settings), Search(settings.max_track_minutes))
-
-    await bot.set_my_commands(
-        [BotCommand(command="start", description="Как пользоваться"), BotCommand(command="help", description="Помощь")]
-    )
-    await dp.start_polling(bot)
+    try:
+        username = await check_bot(bot)
+        dp = build_dispatcher(settings, Downloader(settings), Search(settings.max_track_minutes))
+        log.info("Запущен @%s, жду сообщения", username)
+        await dp.start_polling(bot)
+    finally:
+        await bot.session.close()
 
 
 if __name__ == "__main__":
